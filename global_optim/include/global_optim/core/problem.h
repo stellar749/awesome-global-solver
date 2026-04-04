@@ -22,7 +22,7 @@ class Problem {
   virtual Vector UpperBound() const { return {}; }
 
   // Gradient (optional, required by SVGD)
-  virtual Vector Gradient(const Vector& x) const {
+  virtual Vector Gradient(const Vector& /*x*/) const {
     throw std::runtime_error("Gradient not implemented for this problem");
   }
 

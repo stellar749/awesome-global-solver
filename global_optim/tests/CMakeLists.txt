@@ -19,3 +19,9 @@ endfunction()
 # ── Phase 1 tests ─────────────────────────────────────────────────────────────
 add_gtest(test_random        test_random.cpp)
 add_gtest(test_benchmark_l1  test_benchmark_l1.cpp)
+
+# ── Phase 2 tests ─────────────────────────────────────────────────────────────
+add_gtest(test_cmaes  test_cmaes.cpp)
+add_gtest(test_xnes   test_xnes.cpp)
+add_gtest(test_mppi   test_mppi.cpp)
+add_gtest(test_svgd   test_svgd.cpp)
