@@ -6,9 +6,10 @@
 - Communicates in Chinese
 
 ## Project Status
-- **Phase:** Spec Doc 完成，准备开始 Phase 1 实现
+- **Phase:** Phase 2 完成（CMA-ES / xNES / MPPI / SVGD + L1 验证），准备 Phase 3
 - **Spec Doc:** `docs/spec.md`（完整的项目规格文档）
 - **Memory:** `docs/memory.md`（项目记忆副本）
+- **Implementation Notes:** `docs/implementation_notes.md`（每 Phase 的 bug / 设计决策记录）
 
 ## Tech Stack
 - C++17, Eigen (线性代数), CMake (构建), Google Test (测试)
@@ -38,8 +39,8 @@
 - **可视化:** 搜索过程动画（粒子/椭圆/轨迹束在等高线上的演化）
 
 ## Implementation Phases
-1. **Phase 1: Core Framework** — 项目结构 + 接口 + 随机工具 + L1 函数 ← **下一步**
-2. **Phase 2: Algorithms** — CMA-ES → xNES → SVGD → MPPI + L1 验证
+1. **Phase 1: Core Framework** — 项目结构 + 接口 + 随机工具 + L1 函数 ✅
+2. **Phase 2: Algorithms** — CMA-ES → xNES → SVGD → MPPI + L1 验证 ✅
 3. **Phase 3: Benchmark** — L2 函数 + benchmark runner + 评测指标 + 可视化
 4. **Phase 4: Applications** — L3 场景（含新增 Pendulum/Acrobot/Multi-Goal/Reacher）+ via-point 适配器 + 全算法对比
 5. **Phase 5: V2 Extensions** — REINFORCE (C++) + Flow Matching (PyTorch) + 跨方法对比
@@ -51,6 +52,12 @@ PDFs in `随机全局优化/` and `随机全局优化planning应用/`:
 - MPPI: TOR MPPI, MPPI from theory to parallel control
 - SVGD: Stein Variational Gradient Descent
 - Planning: Cross-entropy motion planning, VP-STO, trajectory distribution control
+
+## Implementation Log 规则
+每个 Phase 实现完成后，**必须**将遇到的重要问题记录到 `docs/implementation_notes.md`，包括：
+- **Bug**：错误原因、影响范围、修复方法
+- **设计认知**：算法的物理/数学限制（如收敛上限、噪声基底）
+- **踩坑**：参数默认值、接口行为等非显而易见的问题
 
 ## Key Design Decisions
 - 统一 Problem/Solver 接口：MPPI 和 CMA-ES/xNES 共享同一 Solver::Solve(Problem)，轨迹问题通过 ControlSequenceProblem 包装
