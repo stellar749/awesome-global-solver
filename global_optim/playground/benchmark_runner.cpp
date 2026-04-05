@@ -122,14 +122,105 @@ std::vector<ProblemEntry> make_problems() {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+// Run a single (solver, problem) pair with population recording enabled.
+// Saves convergence CSV + population CSV, then exits.
+static void run_animate(const std::string& solver_name,
+                        const std::string& problem_name,
+                        const std::string& out_dir) {
+  auto problems = make_problems();
+  const ProblemEntry* pe = nullptr;
+  for (const auto& p : problems)
+    if (p.name == problem_name) { pe = &p; break; }
+
+  if (!pe) {
+    fprintf(stderr, "Unknown problem '%s'. Available:\n", problem_name.c_str());
+    for (const auto& p : problems) fprintf(stderr, "  %s\n", p.name.c_str());
+    exit(1);
+  }
+
+  auto make_solver = [&](uint64_t seed) -> SolverResult {
+    if (solver_name == "cmaes") {
+      CMAESOptions opts; opts.seed = seed;
+      opts.max_iterations = 200; opts.max_evaluations = 50000;
+      opts.sigma0 = 1.0; opts.record_population = true;
+      return CMAESSolver(opts).Solve(*pe->problem, pe->x0_center);
+    } else if (solver_name == "xnes") {
+      XNESOptions opts; opts.seed = seed;
+      opts.max_iterations = 200; opts.max_evaluations = 50000;
+      opts.sigma0 = 1.0; opts.record_population = true;
+      return XNESSolver(opts).Solve(*pe->problem, pe->x0_center);
+    } else if (solver_name == "svgd") {
+      if (!pe->problem->HasGradient()) {
+        fprintf(stderr, "SVGD requires gradient; '%s' has none.\n", problem_name.c_str());
+        exit(1);
+      }
+      SVGDOptions opts; opts.seed = seed;
+      opts.max_iterations = 200; opts.num_particles = 50;
+      opts.step_size = 0.01; opts.temperature = 0.1;
+      opts.use_adagrad = false; opts.record_population = true;
+      return SVGDSolver(opts).Solve(*pe->problem, pe->x0_center);
+    } else if (solver_name == "mppi") {
+      MPPIOptions opts; opts.seed = seed;
+      opts.max_iterations = 200; opts.max_evaluations = 50000;
+      opts.num_samples = 200; opts.noise_sigma = 0.5;
+      opts.record_population = true;
+      return MPPISolver(opts).Solve(*pe->problem, pe->x0_center);
+    } else {
+      fprintf(stderr, "Unknown solver '%s'. Use: cmaes xnes svgd mppi\n",
+              solver_name.c_str());
+      exit(1);
+    }
+  };
+
+  fs::create_directories(out_dir);
+  printf("Recording search process: %s on %s\n",
+         solver_name.c_str(), problem_name.c_str());
+
+  auto result = make_solver(42);
+  printf("  best_cost=%.4e  evals=%d  generations=%d\n",
+         result.best_cost, result.num_evaluations, result.num_iterations);
+
+  // Save convergence CSV
+  RunRecord rec;
+  rec.solver_name  = solver_name;
+  rec.problem_name = problem_name;
+  rec.cost_history = result.cost_history;
+  rec.eval_history = result.eval_history;
+  std::string conv_path = out_dir + "/" + solver_name + "_" + problem_name + "_conv.csv";
+  BenchmarkRunner::SaveConvergenceCSV(rec, conv_path);
+  printf("  Convergence saved: %s\n", conv_path.c_str());
+
+  // Save population history CSV
+  std::string pop_path = out_dir + "/" + solver_name + "_" + problem_name + "_population.csv";
+  BenchmarkRunner::SavePopulationCSV(solver_name, problem_name, result, pop_path);
+  printf("  Population saved:  %s  (%zu frames)\n",
+         pop_path.c_str(), result.population_history.size());
+
+  printf("\nTo render animation:\n");
+  printf("  python visualize.py --mode animation --solver %s --problem %s"
+         " --results-dir %s --output-dir plots\n",
+         solver_name.c_str(), problem_name.c_str(), out_dir.c_str());
+}
+
 int main(int argc, char** argv) {
   int num_seeds  = 51;
   std::string out_dir = "benchmark_results";
+  std::string animate_solver, animate_problem;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--seeds" && i + 1 < argc)   num_seeds  = std::stoi(argv[++i]);
-    if (arg == "--output-dir" && i + 1 < argc) out_dir = argv[++i];
+    if (arg == "--seeds" && i + 1 < argc)        num_seeds       = std::stoi(argv[++i]);
+    if (arg == "--output-dir" && i + 1 < argc)   out_dir         = argv[++i];
+    if (arg == "--animate" && i + 2 < argc) {
+      animate_solver  = argv[++i];
+      animate_problem = argv[++i];
+    }
+  }
+
+  // Single-run animation mode
+  if (!animate_solver.empty()) {
+    run_animate(animate_solver, animate_problem, out_dir);
+    return 0;
   }
 
   fs::create_directories(out_dir);
