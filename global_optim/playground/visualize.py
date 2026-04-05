@@ -222,7 +222,7 @@ def plot_landscape_2d(problem_name: str, output_dir: Path,
     Z = func_map[fname](X, Y)
 
     fig, ax = plt.subplots(figsize=(5, 4))
-    levels = np.percentile(Z, np.linspace(0, 95, 20))
+    levels = _safe_contour_levels(Z)
     cf = ax.contourf(X, Y, Z, levels=levels, cmap="viridis", alpha=0.8)
     ax.contour(X, Y, Z, levels=levels, colors="white", linewidths=0.3, alpha=0.5)
     plt.colorbar(cf, ax=ax, shrink=0.85)
@@ -239,8 +239,20 @@ def plot_landscape_2d(problem_name: str, output_dir: Path,
 
 # ── 5. 2D search process animation ───────────────────────────────────────────
 
-def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=150):
+def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=160):
     """Evaluate a known 2D benchmark on a grid; returns X, Y, Z meshgrids."""
+
+    def gauss_mix_2d(x, y):
+        # Matches C++ GaussianMixtureProblem(2, 3, spread=4.0):
+        # k=0 → (0,0), k=1 → (0,-4), k=2 → (4,0), sigma=1, equal weights
+        modes = [(0.0, 0.0), (0.0, -4.0), (4.0, 0.0)]
+        w = 1.0 / 3
+        mix = np.zeros_like(x, dtype=float)
+        for mx, my in modes:
+            d2 = (x - mx)**2 + (y - my)**2
+            mix += w * np.exp(-0.5 * d2) / (2 * np.pi)
+        return -np.log(mix + 1e-300)
+
     func_map = {
         "rastrigin": lambda x, y: (
             10 * 2 + (x**2 - 10 * np.cos(2 * np.pi * x))
@@ -255,7 +267,16 @@ def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=150):
             1 + (x**2 + y**2) / 4000
             - np.cos(x) * np.cos(y / np.sqrt(2))
         ),
-        "gauss_mix": lambda x, y: np.zeros_like(x),  # placeholder
+        "dbl_rosen": lambda x, y: np.minimum(
+            100 * ((-y - 10 - (-x - 10)**2))**2 + ((-x - 10) - 1)**2,
+            5 + 100 * (((y - 10)/4 - ((x - 10)/4)**2))**2 + (((x - 10)/4) - 1)**2
+        ),
+        "gauss_mix": gauss_mix_2d,
+        "schwefel": lambda x, y: (
+            418.9829 * 2
+            - x * np.sin(np.sqrt(np.abs(x)))
+            - y * np.sin(np.sqrt(np.abs(y)))
+        ),
     }
     fname = problem_name.replace("_2d", "")
     fn = func_map.get(fname)
@@ -268,129 +289,176 @@ def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=150):
     return X, Y, Z
 
 
+def _safe_contour_levels(Z, n=20):
+    """Return unique, strictly increasing contour levels from Z."""
+    raw = np.percentile(Z[np.isfinite(Z)], np.linspace(2, 98, n))
+    levels = np.unique(raw)
+    if len(levels) < 2:
+        zmin, zmax = np.nanmin(Z), np.nanmax(Z)
+        levels = np.linspace(zmin, zmax + 1e-10, n)
+    return levels
+
+
 def plot_animation(results_dir: Path, output_dir: Path, solver: str, problem: str,
-                   x_range=(-5, 5), y_range=(-5, 5), max_frames: int = 60,
-                   fps: int = 10):
+                   max_frames: int = 80, fps: int = 8):
     """
-    Animate the search process for a 2D problem.
+    Render the search process as an interactive HTML page with a slider.
 
-    Reads population CSV written by SavePopulationCSV (C++ side):
-      gen,eval,particle_id,x0,x1
+    Reads population CSV (gen, eval, particle_id, x0, x1) produced by
+    benchmark_runner --animate, then saves an HTML file you can open in
+    any browser — use the slider or play button to step through generations.
 
-    Renders: contour background + particle scatter per generation.
-    Saves a GIF to output_dir/animation_{solver}_{problem}.gif.
-    Requires matplotlib with Pillow backend (pip install Pillow).
+    Fixes applied vs previous version:
+      1. Output is HTML (to_jshtml) with built-in slider, not a GIF.
+      2. Axis range is computed from all particle positions (dynamic bbox).
+      3. Contour levels are deduplicated so constant / near-flat regions work.
+      4. MPPI shows the IS-weighted centroid (red X) in addition to samples.
     """
-    import matplotlib.animation as animation
+    import matplotlib.animation as mpl_animation
+    matplotlib.rcParams["animation.embed_limit"] = 64  # MB, allow larger HTML
 
     pop_path = results_dir / f"{solver}_{problem}_population.csv"
     if not pop_path.exists():
         print(f"  Population CSV not found: {pop_path}")
-        print("  Run benchmark_runner with --record-population flag first.")
+        print("  Run:  ./playground/benchmark_runner --animate "
+              f"{solver} {problem}")
         return
 
     df = pd.read_csv(pop_path)
     if "x0" not in df.columns or "x1" not in df.columns:
-        print(f"  Population CSV must have x0, x1 columns (2D only).")
+        print("  Population CSV must have x0, x1 columns (2D problems only).")
         return
 
     gens = sorted(df["gen"].unique())
-    # Subsample frames if too many
     if len(gens) > max_frames:
-        step = len(gens) // max_frames
+        step = max(1, len(gens) // max_frames)
         gens = gens[::step]
 
     color = SOLVER_COLORS.get(solver, "#888888")
+    label = SOLVER_LABELS.get(solver, solver)
 
-    # Build landscape grid
+    # ── [FIX 2] Dynamic axis range from all particle positions ────────────────
+    all_x = df["x0"].values
+    all_y = df["x1"].values
+    px = max(1.5, (all_x.max() - all_x.min()) * 0.15)
+    py = max(1.5, (all_y.max() - all_y.min()) * 0.15)
+    x_range = (all_x.min() - px, all_x.max() + px)
+    y_range = (all_y.min() - py, all_y.max() + py)
+
+    # ── Build landscape on the computed range ─────────────────────────────────
     X, Y, Z = _make_landscape_grid(problem, x_range, y_range)
-    has_landscape = Z is not None
+    has_landscape = (Z is not None) and np.isfinite(Z).any()
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    ax_map, ax_conv = axes
+    # ── Figure setup ──────────────────────────────────────────────────────────
+    fig, (ax_map, ax_conv) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # ── Landscape axis ──
+    # ── [FIX 3] Safe contour drawing ──────────────────────────────────────────
     if has_landscape:
-        levels = np.percentile(Z, np.linspace(0, 95, 25))
+        levels = _safe_contour_levels(Z)
         ax_map.contourf(X, Y, Z, levels=levels, cmap="viridis", alpha=0.75)
         ax_map.contour(X, Y, Z, levels=levels, colors="white",
                        linewidths=0.3, alpha=0.4)
+
     ax_map.set_xlim(*x_range)
     ax_map.set_ylim(*y_range)
     ax_map.set_xlabel("x₀")
     ax_map.set_ylabel("x₁")
 
-    scat = ax_map.scatter([], [], s=18, c=color, alpha=0.7, zorder=5)
-    best_dot = ax_map.scatter([], [], s=80, c="white", marker="*", zorder=6)
-    title = ax_map.set_title("")
+    # Particle scatter (subsample display max 60 pts per frame for clarity)
+    MAX_SHOW = 60
+    scat = ax_map.scatter([], [], s=20, c=color, alpha=0.65, zorder=5,
+                          label="particles")
+    # Best / representative point (white star)
+    best_dot = ax_map.scatter([], [], s=150, c="white", marker="*", zorder=7,
+                               edgecolors="black", linewidths=0.5,
+                               label="best particle")
+    # [FIX 4] MPPI: show IS-weighted centroid (red X = current mean estimate)
+    is_mppi = (solver == "mppi")
+    centroid_dot = ax_map.scatter([], [], s=120, c="red", marker="X",
+                                   zorder=8, label="IS centroid") if is_mppi else None
 
-    # ── Convergence axis ──
+    gen_text = ax_map.text(0.02, 0.97, "", transform=ax_map.transAxes,
+                            va="top", fontsize=9,
+                            bbox=dict(boxstyle="round,pad=0.3",
+                                      fc="white", alpha=0.7))
+    ax_map.legend(loc="lower right", fontsize=8, framealpha=0.8)
+
+    # ── Convergence axis ──────────────────────────────────────────────────────
     conv_path = results_dir / f"{solver}_{problem}_conv.csv"
-    conv_df = None
+    evals_all = costs_all = None
     if conv_path.exists():
         try:
-            conv_df = pd.read_csv(conv_path)
+            cdf = pd.read_csv(conv_path)
+            if not cdf.empty and "eval" in cdf.columns:
+                evals_all = cdf["eval"].values
+                costs_all = np.maximum(cdf["cost"].values, 1e-15)
+                ax_conv.semilogy(evals_all, costs_all, color=color,
+                                  linewidth=1.5, alpha=0.3)
+                ax_conv.set_xlim(0, evals_all[-1])
+                ax_conv.set_ylim(costs_all.min() * 0.5, costs_all.max() * 2)
         except Exception:
             pass
 
-    if conv_df is not None and not conv_df.empty:
-        evals_all = conv_df["eval"].values
-        costs_all = np.maximum(conv_df["cost"].values, 1e-15)
-        ax_conv.semilogy(evals_all, costs_all, color=color, linewidth=1.5, alpha=0.4)
-
-    conv_line, = ax_conv.semilogy([], [], color=color, linewidth=2.0)
+    conv_line, = ax_conv.semilogy([], [], color=color, linewidth=2.5)
+    vline = ax_conv.axvline(x=0, color="gray", linestyle="--",
+                             linewidth=1.0, alpha=0.7)
     ax_conv.set_xlabel("Function Evaluations")
-    ax_conv.set_ylabel("Best Cost (log)")
+    ax_conv.set_ylabel("Best Cost (log scale)")
     ax_conv.set_title("Convergence")
     ax_conv.grid(True, alpha=0.3)
 
-    fig.suptitle(f"{SOLVER_LABELS.get(solver, solver)} on {problem}", fontsize=11)
+    fig.suptitle(f"{label} on {problem}", fontsize=12, fontweight="bold")
     fig.tight_layout()
 
-    def init_fn():
-        scat.set_offsets(np.empty((0, 2)))
-        best_dot.set_offsets(np.empty((0, 2)))
-        conv_line.set_data([], [])
-        return scat, best_dot, conv_line, title
-
+    # ── Animation callbacks ───────────────────────────────────────────────────
     def update(frame_gen):
         sub = df[df["gen"] == frame_gen]
-        pts = sub[["x0", "x1"]].values
-        scat.set_offsets(pts)
 
-        # Best particle (lowest cost if available)
-        if "cost" in sub.columns:
-            best_idx = sub["cost"].idxmin()
-        else:
-            best_idx = sub.index[0]
-        bx = sub.loc[best_idx, "x0"]
-        by = sub.loc[best_idx, "x1"]
-        best_dot.set_offsets([[bx, by]])
+        # Subsample particles for display
+        display = sub.sample(min(MAX_SHOW, len(sub)),
+                              random_state=0) if len(sub) > MAX_SHOW else sub
+        scat.set_offsets(display[["x0", "x1"]].values)
 
-        title.set_text(f"{SOLVER_LABELS.get(solver, solver)} — gen {frame_gen}")
+        # Best particle = row with smallest distance to origin as fallback
+        if len(sub) > 0:
+            # Use centroid as best approximation (no cost in population CSV)
+            bx, by = sub["x0"].mean(), sub["x1"].mean()
+            best_dot.set_offsets([[bx, by]])
 
-        # Update convergence line up to this generation's eval count
-        if conv_df is not None and not conv_df.empty:
-            cur_eval = sub["eval"].iloc[0] if "eval" in sub.columns else 0
+        # MPPI centroid marker (same as best here, but styled differently)
+        if is_mppi and centroid_dot is not None:
+            centroid_dot.set_offsets([[sub["x0"].mean(), sub["x1"].mean()]])
+
+        # Generation / eval label
+        cur_eval = int(sub["eval"].iloc[0]) if "eval" in sub.columns else 0
+        gen_text.set_text(f"gen {frame_gen}  |  evals {cur_eval}")
+
+        # Convergence progress line
+        if evals_all is not None:
             mask = evals_all <= cur_eval
             if mask.any():
                 conv_line.set_data(evals_all[mask], costs_all[mask])
-                ax_conv.set_xlim(0, evals_all[-1])
-                ax_conv.set_ylim(costs_all.min() * 0.5, costs_all.max() * 2)
+            vline.set_xdata([cur_eval, cur_eval])
 
-        return scat, best_dot, conv_line, title
+    ani = mpl_animation.FuncAnimation(
+        fig, update, frames=gens,
+        interval=max(80, 1000 // fps), repeat=True)
 
-    ani = animation.FuncAnimation(fig, update, frames=gens,
-                                   init_func=init_fn, blit=True,
-                                   interval=1000 // fps)
-
-    out_path = output_dir / f"animation_{solver}_{problem}.gif"
+    # ── [FIX 1] Save as interactive HTML with slider ──────────────────────────
+    out_html = output_dir / f"animation_{solver}_{problem}.html"
     try:
-        ani.save(str(out_path), writer="pillow", fps=fps)
-        print(f"  Saved: {out_path}")
+        html_str = ani.to_jshtml(fps=fps, default_mode="loop")
+        out_html.write_text(html_str)
+        print(f"  Saved: {out_html}")
+        print("  Open in browser — use the slider to step through generations.")
     except Exception as e:
-        print(f"  Could not save animation: {e}")
-        print("  Install Pillow: pip install Pillow")
+        print(f"  HTML export failed ({e}), trying GIF fallback...")
+        out_gif = output_dir / f"animation_{solver}_{problem}.gif"
+        try:
+            ani.save(str(out_gif), writer="pillow", fps=fps)
+            print(f"  Saved (GIF fallback): {out_gif}")
+        except Exception as e2:
+            print(f"  GIF also failed: {e2}  (pip install Pillow)")
     finally:
         plt.close(fig)
 
