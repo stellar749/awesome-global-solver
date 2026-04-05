@@ -6,7 +6,7 @@
 - Communicates in Chinese
 
 ## Project Status
-- **Phase:** Phase 2 完成（CMA-ES / xNES / MPPI / SVGD + L1 验证），准备 Phase 3
+- **Phase:** Phase 3 完成（L2 函数 + Benchmark + 可视化），准备 Phase 4
 - **Spec Doc:** `docs/spec.md`（完整的项目规格文档）
 - **Memory:** `docs/memory.md`（项目记忆副本）
 - **Implementation Notes:** `docs/implementation_notes.md`（每 Phase 的 bug / 设计决策记录）
