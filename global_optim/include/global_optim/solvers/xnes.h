@@ -79,8 +79,7 @@ class XNESSolver : public Solver {
       // ── 1. Sample ────────────────────────────────────────────────────────
       for (int k = 0; k < lam; ++k) {
         zs[k] = rng.RandNVector(n);
-        Vector x = mu + sigma * (B * zs[k]);
-        costs[k] = problem.Evaluate(x);
+        costs[k] = problem.Evaluate(mu + sigma * (B * zs[k]));
         ++result.num_evaluations;
       }
 
@@ -98,6 +97,15 @@ class XNESSolver : public Solver {
         }
       }
       result.cost_history.push_back(result.best_cost);
+      result.eval_history.push_back(result.num_evaluations);
+
+      if (opts_.record_population) {
+        Matrix pop(lam, n);
+        for (int k = 0; k < lam; ++k)
+          pop.row(k) = (mu + sigma * (B * zs[k])).transpose();
+        result.population_history.push_back(pop);
+        result.population_eval_history.push_back(result.num_evaluations);
+      }
 
       if (opts_.verbose)
         printf("[xNES] gen %4d  evals %6d  best %.6e  sigma %.4e\n",

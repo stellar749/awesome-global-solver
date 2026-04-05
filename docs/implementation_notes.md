@@ -102,6 +102,81 @@ opts.max_evaluations = K * max_iterations * 2;  // 给足余量
 
 ---
 
+## Phase 3: Benchmark & Visualization
+
+### Bug 1: GCC 不允许嵌套类含 in-class default initializer 时作为外层构造函数的默认实参
+
+**问题**
+`BenchmarkRunner` 内嵌套了 `Config` 结构体，并用 in-class 默认值：
+```cpp
+struct Config {
+  int num_seeds = 51;          // in-class default initializer
+  double success_threshold = 1e-4;
+  ...
+};
+explicit BenchmarkRunner(Config cfg = Config());  // ❌ GCC 报错
+```
+GCC（C++17 模式）报 "default member initializer for 'Config::num_seeds' required before the end of its enclosing class"。这是 GCC 的一个已知限制：在外层类的构造函数声明中使用嵌套类型作为默认参数时，嵌套类的 in-class initializer 尚未完成解析。
+
+**修复**
+将嵌套 `Config` 改为显式构造函数（不用 in-class 默认值）：
+```cpp
+struct Config {
+  int num_seeds;
+  ...
+  Config() : num_seeds(51), ... {}  // ✓ 用构造函数
+};
+explicit BenchmarkRunner(Config cfg = Config()) : cfg_(cfg) {}  // 现在可以
+```
+
+**教训**
+嵌套 struct + in-class default initializer + 外层类默认参数是 GCC 的特殊限制（Clang 不报错）。跨平台代码中嵌套类若需作为外层函数的默认参数，应使用显式构造函数而非 in-class initializer。
+
+---
+
+### Bug 2: CMA-ES 默认种群大小在 2D Rastrigin 上全局搜索能力不足
+
+**问题**
+CMA-ES 的默认种群大小为 `λ = 4 + floor(3·ln(n))`，2D 时 λ=6。以 500 次迭代 + σ₀=2.0 在 2D Rastrigin 上运行，10 次随机种子的成功率（cost < 0.1）只有 10%，远低于期望的 50%。
+
+**原因**
+Rastrigin 在 [-5.12, 5.12]² 内有 ~100 个局部极值，相邻极值间隔约 1。λ=6 的种群在单次迭代内只能覆盖非常小的搜索空间。当 σ 在早期迭代中因正确选择而收缩时，种群便会陷入局部极值。
+
+**修复**
+测试中显式设置 `opts.lambda = 20`，并将迭代次数增至 2000，成功率提升至 ≥50%。
+
+**教训**
+对于密集多模态函数（相邻极值间隔 ~ σ），λ 需要足够大以保证每代至少有一个样本落入正确盆地。经验规则：λ ≥ 10 × dim（对 Rastrigin 类函数）。自动化基准测试中的超参应与问题的 landscape 特性匹配，而非使用算法默认值。
+
+---
+
+### 设计认知 1: population_history 默认关闭以避免内存开销
+
+种群历史（`record_population = true`）会在每代存储一个 `(λ × dim)` 矩阵。对 51 个种子 × 1000 代 × λ=20 × dim=10 的 benchmark 运行，内存占用约 51 × 1000 × 20 × 10 × 8 bytes ≈ 80 MB/solver，不可接受。
+
+因此 `record_population` 默认关闭，仅在需要可视化的单次运行中手动启用（通常 1 个种子，10~100 代快照足够）。
+
+---
+
+### 设计认知 2: ECDF 在 C++ 侧仅计算原始数据，渲染在 Python 侧
+
+`BenchmarkRunner::ComputeECDF` 只返回 `(sorted_costs, cdf_fractions)` 两个向量，不做任何绘图。BBOB/COCO 风格的 ECDF 曲线（对数坐标、多精度阈值层叠）的渲染完全交由 `visualize.py`。这保持了 C++ 侧的轻量性，也让 Python 侧有完整的数据灵活性。
+
+---
+
+### 设计认知 3: RandomBasin 函数的 sin² 平滑项在整数点退化为 0
+
+`f(z) = 1 - 0.9·R(⌊z/10⌋) - 0.1·R(⌊z⌋)·∏sin²(πzᵢ)^{1/200d}` 中，`sin²(πzᵢ)` 在整数点处为 0，乘积退化为 0，第二项消失。这意味着：
+
+- **整数点上**：`f = 1 - 0.9·R(⌊z/10⌋)`，仅由粗尺度 basin 决定
+- **半整数点上**：`f = 1 - 0.9·R_coarse - 0.1·R_fine`，细尺度 basin 贡献最大
+
+全局最小值在某个半整数点（如 `(k+0.5, ...)` 组合），对应两个 R 值均接近 1 的 basin 中心。函数范围理论上在 `[1-0.9-0.1, 1] = [0, 1]`，实际因 R 无法精确为 1，最小值略大于 0。
+
+`HasGradient() = false`：floor 函数在 basin 边界处不连续，整体不提供梯度，SVGD 无法直接使用。
+
+---
+
 ## Phase 1: Core Framework
 
 无重大问题。仅有一个 `-Wunused-parameter` warning（`Problem::Gradient` 基类默认实现的参数名），用 `/*x*/` 注释掉即可。

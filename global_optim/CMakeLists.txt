@@ -23,3 +23,8 @@ if(BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+option(BUILD_PLAYGROUND "Build playground executables" ON)
+if(BUILD_PLAYGROUND)
+  add_subdirectory(playground)
+endif()

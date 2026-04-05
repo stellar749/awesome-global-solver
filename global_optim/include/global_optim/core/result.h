@@ -11,8 +11,17 @@ struct SolverResult {
   int num_iterations = 0;      // Total iterations completed
   double elapsed_time_ms = 0;  // Wall-clock time
 
-  // Best cost per iteration (for convergence plots)
-  std::vector<double> cost_history;
+  // Convergence history — parallel arrays, one entry per recorded iteration.
+  // Use eval_history as x-axis for fair cross-algorithm comparison.
+  std::vector<double> cost_history;  // best cost at each checkpoint
+  std::vector<int> eval_history;     // cumulative evaluations at each checkpoint
+
+  // Per-generation population snapshots (only populated when
+  // SolverOptions::record_population = true).
+  // population_history[g] is a (population_size x dim) matrix of sample positions.
+  // population_eval_history[g] is the cumulative eval count at generation g.
+  std::vector<Matrix> population_history;
+  std::vector<int>    population_eval_history;
 };
 
 // Trajectory extracted from a ControlSequenceProblem result

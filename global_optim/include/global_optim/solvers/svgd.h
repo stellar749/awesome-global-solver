@@ -147,6 +147,12 @@ class SVGDSolver : public Solver {
         result.best_x = X.row(iter_bi).transpose();
       }
       result.cost_history.push_back(result.best_cost);
+      result.eval_history.push_back(result.num_evaluations);
+
+      if (opts_.record_population) {
+        result.population_history.push_back(X);
+        result.population_eval_history.push_back(result.num_evaluations);
+      }
 
       if (opts_.verbose)
         printf("[SVGD] iter %4d  evals %6d  best %.6e  h %.4e\n",

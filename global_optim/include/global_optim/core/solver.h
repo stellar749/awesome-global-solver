@@ -15,6 +15,10 @@ struct SolverOptions {
   double cost_target = -std::numeric_limits<double>::infinity();
   bool verbose = false;
   uint64_t seed = 42;
+  // When true, solvers record per-generation population positions in
+  // SolverResult::population_history (useful for visualization; disabled by
+  // default to avoid memory overhead in benchmark runs).
+  bool record_population = false;
 };
 
 // Unified solver base class — CMA-ES, xNES, SVGD, MPPI all derive from this.

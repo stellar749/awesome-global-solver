@@ -121,6 +121,14 @@ class CMAESSolver : public Solver {
         result.best_x = xs[idx[0]];
       }
       result.cost_history.push_back(result.best_cost);
+      result.eval_history.push_back(result.num_evaluations);
+
+      if (opts_.record_population) {
+        Matrix pop(lam, n);
+        for (int k = 0; k < lam; ++k) pop.row(k) = xs[k].transpose();
+        result.population_history.push_back(pop);
+        result.population_eval_history.push_back(result.num_evaluations);
+      }
 
       if (opts_.verbose)
         printf("[CMA-ES] gen %4d  evals %6d  best %.6e  sigma %.4e\n",

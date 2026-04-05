@@ -92,6 +92,14 @@ class MPPISolver : public Solver {
         result.best_x = x;
       }
       result.cost_history.push_back(result.best_cost);
+      result.eval_history.push_back(result.num_evaluations);
+
+      if (opts_.record_population) {
+        Matrix pop(K, d);
+        for (int k = 0; k < K; ++k) pop.row(k) = (x + eps[k]).transpose();
+        result.population_history.push_back(pop);
+        result.population_eval_history.push_back(result.num_evaluations);
+      }
 
       if (opts_.verbose)
         printf("[MPPI] iter %4d  evals %6d  best %.6e\n",

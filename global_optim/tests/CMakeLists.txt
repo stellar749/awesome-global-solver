@@ -25,3 +25,6 @@ add_gtest(test_cmaes  test_cmaes.cpp)
 add_gtest(test_xnes   test_xnes.cpp)
 add_gtest(test_mppi   test_mppi.cpp)
 add_gtest(test_svgd   test_svgd.cpp)
+
+# ── Phase 3 tests ─────────────────────────────────────────────────────────────
+add_gtest(test_benchmark_l2  test_benchmark_l2.cpp)
