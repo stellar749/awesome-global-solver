@@ -19,6 +19,8 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")  # headless rendering
+matplotlib.rcParams["savefig.dpi"] = 72        # lower DPI → faster HTML export
+matplotlib.rcParams["figure.dpi"]  = 72
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
@@ -128,7 +130,7 @@ def plot_boxplots(results_dir: Path, output_dir: Path):
         labels = [SOLVER_LABELS.get(s, s) for s in solvers]
         colors = [SOLVER_COLORS[s] for s in solvers]
 
-        bp = ax.boxplot(data, labels=labels, patch_artist=True, notch=False)
+        bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, notch=False)
         for patch, color in zip(bp["boxes"], colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
@@ -239,7 +241,7 @@ def plot_landscape_2d(problem_name: str, output_dir: Path,
 
 # ── 5. 2D search process animation ───────────────────────────────────────────
 
-def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=160):
+def _make_landscape_grid(problem_name: str, x_range, y_range, resolution=100):
     """Evaluate a known 2D benchmark on a grid; returns X, Y, Z meshgrids."""
 
     def gauss_mix_2d(x, y):
@@ -300,7 +302,7 @@ def _safe_contour_levels(Z, n=20):
 
 
 def plot_animation(results_dir: Path, output_dir: Path, solver: str, problem: str,
-                   max_frames: int = 80, fps: int = 8):
+                   max_frames: int = 50, fps: int = 8):
     """
     Render the search process as an interactive HTML page with a slider.
 
@@ -463,6 +465,229 @@ def plot_animation(results_dir: Path, output_dir: Path, solver: str, problem: st
         plt.close(fig)
 
 
+# ── 6. Multi-algorithm comparison dashboard ───────────────────────────────────
+
+def compare_dashboard(results_dir: Path, output_dir: Path, problem: str,
+                      solvers: list = None):
+    """
+    Generate a 4-panel comparison dashboard for all solvers on one problem.
+
+    Requires two CSV files in results_dir:
+      benchmark_results.csv          — per-run final costs (multi-seed)
+      compare_{problem}_conv.csv     — per-seed convergence curves (multi-seed)
+
+    Both are produced by:
+      benchmark_runner --problem <problem> --seeds N
+
+    Panels:
+      Top-left  : Convergence curves — median + IQR band, interpolated onto a
+                  common eval grid.  Reveals speed of convergence.
+      Top-right : ECDF of final best cost — shows reliability across seeds.
+      Bottom-left: Box plots of final best cost (log scale).
+      Bottom-right: Summary table — median / success-rate / median-evals.
+
+    Output: compare_{problem}.html  (interactive, open in browser)
+    """
+    # ── Load data ──────────────────────────────────────────────────────────────
+    results_csv = results_dir / "benchmark_results.csv"
+    conv_csv    = results_dir / f"compare_{problem}_conv.csv"
+
+    if not results_csv.exists():
+        print(f"  benchmark_results.csv not found in {results_dir}.")
+        print(f"  Run:  benchmark_runner --problem {problem} --seeds 20")
+        return
+
+    df_runs = pd.read_csv(results_csv)
+    df_runs = df_runs[df_runs["problem"] == problem]
+    if df_runs.empty:
+        print(f"  No data for problem '{problem}' in benchmark_results.csv.")
+        return
+
+    has_conv = conv_csv.exists()
+    df_conv  = pd.read_csv(conv_csv) if has_conv else None
+
+    active_solvers = solvers or [s for s in SOLVER_COLORS
+                                  if s in df_runs["solver"].unique()]
+    if not active_solvers:
+        print("  No solver data found.")
+        return
+
+    # ── Figure ────────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    ax_conv, ax_ecdf, ax_box, ax_table = (axes[0, 0], axes[0, 1],
+                                           axes[1, 0], axes[1, 1])
+    fig.suptitle(f"Solver Comparison — {problem}", fontsize=13, fontweight="bold")
+
+    # ── Panel 1: Convergence bands ────────────────────────────────────────────
+    if has_conv and df_conv is not None:
+        # Build a common eval grid (log-spaced, up to max eval seen)
+        max_eval = df_conv["eval"].max()
+        grid     = np.unique(np.round(
+            np.geomspace(1, max_eval, 200)).astype(int))
+
+        for solver in active_solvers:
+            color = SOLVER_COLORS.get(solver, "#888888")
+            label = SOLVER_LABELS.get(solver, solver)
+            sub   = df_conv[df_conv["solver"] == solver]
+            seeds = sub["seed"].unique()
+            if len(seeds) == 0:
+                continue
+
+            # Interpolate each seed onto the common grid
+            curves = []
+            for seed in seeds:
+                s = sub[sub["seed"] == seed].sort_values("eval")
+                if s.empty:
+                    continue
+                # Step-interpolate: last known cost before each grid point
+                interp = np.interp(grid, s["eval"].values,
+                                   np.log10(np.maximum(s["cost"].values, 1e-15)))
+                curves.append(interp)
+
+            if not curves:
+                continue
+            curves = np.array(curves)          # (n_seeds, n_grid)
+            med    = np.median(curves, axis=0)
+            q25    = np.percentile(curves, 25, axis=0)
+            q75    = np.percentile(curves, 75, axis=0)
+
+            ax_conv.plot(grid, med, color=color, linewidth=2, label=label)
+            ax_conv.fill_between(grid, q25, q75, color=color, alpha=0.18)
+
+        ax_conv.set_xscale("log")
+        ax_conv.set_xlabel("Function Evaluations (log)")
+        ax_conv.set_ylabel("Best Cost log₁₀ (median ± IQR)")
+        ax_conv.set_title("Convergence Curves")
+        ax_conv.legend(fontsize=9)
+        ax_conv.grid(True, alpha=0.3, which="both")
+    else:
+        ax_conv.text(0.5, 0.5,
+                     "Run with --seeds N to get\nconvergence band data.",
+                     ha="center", va="center", transform=ax_conv.transAxes,
+                     fontsize=10, color="gray")
+        ax_conv.set_title("Convergence Curves (no data)")
+
+    # ── Panel 2: ECDF ─────────────────────────────────────────────────────────
+    for solver in active_solvers:
+        color  = SOLVER_COLORS.get(solver, "#888888")
+        label  = SOLVER_LABELS.get(solver, solver)
+        costs  = df_runs[df_runs["solver"] == solver]["best_cost"].dropna()
+        if costs.empty:
+            continue
+        sc     = np.sort(costs.values)
+        ecdf   = np.arange(1, len(sc) + 1) / len(sc)
+        ax_ecdf.step(sc, ecdf, color=color, linewidth=2,
+                     label=f"{label} (n={len(sc)})", where="post")
+
+    ax_ecdf.set_xscale("log")
+    ax_ecdf.set_xlabel("Best Cost Threshold (log)")
+    ax_ecdf.set_ylabel("Fraction of Runs ≤ threshold")
+    ax_ecdf.set_title("ECDF of Final Cost")
+    ax_ecdf.legend(fontsize=9)
+    ax_ecdf.grid(True, alpha=0.3)
+    ax_ecdf.set_ylim(0, 1.05)
+
+    # ── Panel 3: Box plots ────────────────────────────────────────────────────
+    box_data   = []
+    box_labels = []
+    box_colors = []
+    for solver in active_solvers:
+        costs = df_runs[df_runs["solver"] == solver]["best_cost"].dropna()
+        if costs.empty:
+            continue
+        box_data.append(np.maximum(costs.values, 1e-15))
+        box_labels.append(SOLVER_LABELS.get(solver, solver))
+        box_colors.append(SOLVER_COLORS.get(solver, "#888888"))
+
+    if box_data:
+        bp = ax_box.boxplot(box_data, tick_labels=box_labels, patch_artist=True,
+                            notch=False, showfliers=True,
+                            flierprops=dict(marker=".", markersize=4, alpha=0.5))
+        for patch, color in zip(bp["boxes"], box_colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.65)
+        for median_line in bp["medians"]:
+            median_line.set_color("white")
+            median_line.set_linewidth(2)
+    ax_box.set_yscale("log")
+    ax_box.set_ylabel("Final Best Cost (log)")
+    ax_box.set_title("Final Cost Distribution")
+    ax_box.grid(True, axis="y", alpha=0.3)
+
+    # ── Panel 4: Summary table ────────────────────────────────────────────────
+    ax_table.axis("off")
+    headers = ["Solver", "Median", "Q25", "Q75", "Success%", "Median Evals"]
+    rows = []
+    for solver in active_solvers:
+        sub = df_runs[df_runs["solver"] == solver]
+        if sub.empty:
+            continue
+        costs = np.sort(sub["best_cost"].dropna().values)
+        evals = sub["num_evaluations"].dropna().values
+        thresh = 1e-3
+        sr = (costs <= thresh).mean() * 100
+        med_ev = np.median(evals) if len(evals) else float("nan")
+
+        def pct(v, p):
+            return f"{np.percentile(v, p):.2e}" if len(v) else "—"
+
+        rows.append([
+            SOLVER_LABELS.get(solver, solver),
+            pct(costs, 50), pct(costs, 25), pct(costs, 75),
+            f"{sr:.0f}%",
+            f"{med_ev:.0f}" if not np.isnan(med_ev) else "—",
+        ])
+
+    if rows:
+        tbl = ax_table.table(
+            cellText=rows, colLabels=headers,
+            loc="center", cellLoc="center")
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1.1, 1.8)
+        # Color header
+        for j in range(len(headers)):
+            tbl[0, j].set_facecolor("#2C3E50")
+            tbl[0, j].set_text_props(color="white", fontweight="bold")
+        # Color row backgrounds by solver
+        for i, solver in enumerate(active_solvers):
+            col = SOLVER_COLORS.get(solver, "#EEEEEE")
+            for j in range(len(headers)):
+                tbl[i + 1, j].set_facecolor(col + "33")  # 20% alpha hex
+    ax_table.set_title("Summary Statistics  (success threshold = 1e-3)", pad=10)
+
+    fig.tight_layout()
+
+    # ── Save as interactive HTML ───────────────────────────────────────────────
+    # The table panel is static; wrap the whole figure as a static PNG inside
+    # an HTML page (no animation needed for compare dashboard).
+    out_html = output_dir / f"compare_{problem}.html"
+    out_png  = output_dir / f"compare_{problem}.png"
+    fig.savefig(str(out_png), dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+    # Embed PNG in a minimal HTML with a clean background
+    import base64
+    png_b64 = base64.b64encode(out_png.read_bytes()).decode()
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Solver Comparison — {problem}</title>
+<style>
+  body {{ margin:0; background:#1a1a2e; display:flex;
+          flex-direction:column; align-items:center; padding:20px; }}
+  h2   {{ color:#eee; font-family:sans-serif; margin-bottom:10px; }}
+  img  {{ max-width:100%; border-radius:8px;
+          box-shadow:0 4px 20px rgba(0,0,0,0.5); }}
+</style></head>
+<body>
+<h2>Solver Comparison — {problem}</h2>
+<img src="data:image/png;base64,{png_b64}" alt="comparison dashboard">
+</body></html>"""
+    out_html.write_text(html)
+    print(f"  Saved: {out_html}  (open in browser)")
+    print(f"  PNG:   {out_png}")
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -473,7 +698,7 @@ def main():
                         help="Directory to save plot images")
     parser.add_argument("--mode", default="all",
                         choices=["all", "convergence", "boxplot", "ecdf",
-                                 "landscape", "animation"],
+                                 "landscape", "animation", "compare"],
                         help="Which plots to generate")
     parser.add_argument("--problem", default=None,
                         help="Filter to specific problem (for ecdf/landscape/animation mode)")
@@ -508,11 +733,16 @@ def main():
             plot_landscape_2d(prob, output_dir)
 
     if mode == "animation":
-        # Animation mode: requires --solver and --problem
         solver = getattr(args, "solver", None) or "cmaes"
         problem = args.problem or "rastrigin_2d"
         print(f"Generating animation for {solver} on {problem}...")
         plot_animation(results_dir, output_dir, solver, problem)
+
+    if mode == "compare":
+        problem = args.problem or "rastrigin_2d"
+        solvers = args.solver.split(",") if args.solver else None
+        print(f"Generating comparison dashboard for {problem}...")
+        compare_dashboard(results_dir, output_dir, problem, solvers)
 
     print("Done.")
 

@@ -206,11 +206,13 @@ int main(int argc, char** argv) {
   int num_seeds  = 51;
   std::string out_dir = "benchmark_results";
   std::string animate_solver, animate_problem;
+  std::string filter_problem;   // if set, only run this problem (compare mode)
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--seeds" && i + 1 < argc)        num_seeds       = std::stoi(argv[++i]);
     if (arg == "--output-dir" && i + 1 < argc)   out_dir         = argv[++i];
+    if (arg == "--problem" && i + 1 < argc)      filter_problem  = argv[++i];
     if (arg == "--animate" && i + 2 < argc) {
       animate_solver  = argv[++i];
       animate_problem = argv[++i];
@@ -234,27 +236,37 @@ int main(int argc, char** argv) {
   auto problems = make_problems();
 
   // Solver name → factory function
-  struct SolverEntry { std::string name; SolverFn fn; bool needs_grad; };
+  struct SolverEntry { std::string name; SolverFn fn; };
   std::vector<SolverEntry> solvers = {
-    {"cmaes", run_cmaes, false},
-    {"xnes",  run_xnes,  false},
-    {"svgd",  run_svgd,  true},
-    {"mppi",  run_mppi,  false},
+    {"cmaes", run_cmaes},
+    {"xnes",  run_xnes},
+    {"svgd",  run_svgd},
+    {"mppi",  run_mppi},
   };
 
   std::vector<RunRecord> all_records;
   std::vector<BenchmarkSummary> summaries;
 
+  // When comparing a single problem, collect per-seed convergence for bands
+  std::ofstream multi_conv_file;
+  bool save_multi_conv = !filter_problem.empty();
+  if (save_multi_conv) {
+    std::string mc_path = out_dir + "/compare_" + filter_problem + "_conv.csv";
+    multi_conv_file.open(mc_path);
+    multi_conv_file << "solver,seed,eval,cost\n";
+    printf("Compare mode: problem='%s', seeds=%d\n",
+           filter_problem.c_str(), num_seeds);
+  }
+
   for (const auto& prob : problems) {
+    if (!filter_problem.empty() && prob.name != filter_problem) continue;
+
     printf("\n[%s  dim=%d]\n", prob.name.c_str(), prob.problem->Dimension());
 
     for (const auto& sol : solvers) {
-      // SVGD skips problems without gradient (returns trivial result)
-      // Other solvers run on all problems
       printf("  Running %-6s ... ", sol.name.c_str()); fflush(stdout);
 
       auto x0_fn = [&prob](uint64_t seed) -> Vector {
-        // Start from x0_center + small Gaussian noise
         std::mt19937_64 rng(seed);
         std::normal_distribution<double> nd(0.0, 0.5);
         Vector x0 = prob.x0_center;
@@ -269,14 +281,24 @@ int main(int argc, char** argv) {
       printf("median=%.3e  success=%.0f%%\n",
              summary.median_cost, 100.0 * summary.success_rate);
 
-      // Append to global list
       for (auto& r : records) all_records.push_back(r);
 
-      // Save per-solver per-problem convergence curve (median seed)
+      // Single-seed convergence curve (for animation overlay)
       std::string conv_path = out_dir + "/" + sol.name + "_" + prob.name + "_conv.csv";
-      // Save the first run's convergence curve as example
       if (!records.empty())
         BenchmarkRunner::SaveConvergenceCSV(records[0], conv_path);
+
+      // Multi-seed convergence (for compare dashboard bands)
+      if (save_multi_conv) {
+        for (const auto& rec : records) {
+          for (size_t i = 0; i < rec.cost_history.size(); ++i) {
+            int ev = i < rec.eval_history.size()
+                     ? rec.eval_history[i] : static_cast<int>(i);
+            multi_conv_file << sol.name << ',' << rec.seed << ','
+                            << ev << ',' << rec.cost_history[i] << '\n';
+          }
+        }
+      }
     }
   }
 
